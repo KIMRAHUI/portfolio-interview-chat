@@ -7,7 +7,7 @@ import axios from 'axios';
 import missedMessageRoute from './routes/missedMessage';
 import saveInterviewerRoute from './routes/saveInterviewer';
 import canStartChatRoute from './routes/canStartChat';
-
+export { io };
 dotenv.config();
 
 const app = express();
@@ -16,11 +16,6 @@ const io = new Server(server, {
   cors: { origin: '*' },
 });
 
-app.use(cors());
-app.use(express.json());
-app.use('/missed-message', missedMessageRoute);
-app.use('/save-interviewer', saveInterviewerRoute);
-app.use('/can-start-chat', canStartChatRoute);
 
 const PORT = process.env.PORT || 10000;
 
@@ -34,14 +29,18 @@ export let activeInterviewer: {
   socketId: string;
 } | null = null;
 
-// ✅ 지원자 상태 수동 변경
+// ✅ REST API 연결
+app.use(cors());
+app.use(express.json());
+app.use('/missed-message', missedMessageRoute);
+app.use('/save-interviewer', saveInterviewerRoute);
+app.use('/can-start-chat', canStartChatRoute);
+
 app.post('/set-availability', (req, res) => {
   const { active } = req.body;
   isAvailable = !!active;
   console.log(`📡 지원자 상태 변경됨 → ${isAvailable ? '활동중' : '부재중'}`);
   res.status(200).json({ status: isAvailable ? '활동중' : '부재중' });
-
-  // 상태 변경 즉시 브로드캐스트
   io.emit('availability', { status: isAvailable });
 });
 
@@ -59,22 +58,19 @@ io.on('connection', (socket) => {
   console.log(`🟢 ${role} 접속: ${socket.id} (${name}/${company})`);
 
   // ✅ 면접관 진입 제한 처리
- // socket 연결 시점에서는 등록만 해두고,
-// 실제 입장 판단은 interviewer-enter 이벤트에서 처리
-socket.on('interviewer-enter', ({ name, company }) => {
-  if (activeInterviewer) {
-    socket.emit('entry-denied', {
-      message: '현재 채팅 중입니다. 이메일로 문의 주세요.',
-    });
-    console.log(`❌ 입장 거부됨: ${name}/${company}`);
-    return;
-  }
+  socket.on('interviewer-enter', ({ name, company }) => {
+    if (activeInterviewer) {
+      socket.emit('entry-denied', {
+        message: '현재 채팅 중입니다. 이메일로 문의 주세요.',
+      });
+      console.log(`❌ 입장 거부됨: ${name}/${company}`);
+      return;
+    }
 
-  activeInterviewer = { name, company, socketId: socket.id };
-  socket.emit('entry-accepted');
-  console.log(`✅ 입장 허용됨: ${name}/${company}`);
-});
-
+    activeInterviewer = { name, company, socketId: socket.id };
+    socket.emit('entry-accepted');
+    console.log(`✅ 입장 허용됨: ${name}/${company}`);
+  });
 
   // — 면접관 접속 시 지원자에게 info 전달
   if (role === 'interviewer') {
@@ -128,7 +124,6 @@ socket.on('interviewer-enter', ({ name, company }) => {
         });
       }
     } else {
-      // ✅ 부재중 처리: 안내 + 자동응답 + Supabase 저장
       socket.emit('auto-reply', {
         message: '지금은 부재중입니다. 이메일(rho0531@naver.com)로 문의해주세요. 📩',
       });
@@ -160,7 +155,6 @@ socket.on('interviewer-enter', ({ name, company }) => {
         });
       }
 
-      // Supabase 저장
       axios.post(`http://localhost:${PORT}/missed-message`, {
         name: socket.data.name,
         company: socket.data.company,
@@ -180,10 +174,14 @@ socket.on('interviewer-enter', ({ name, company }) => {
 
   // ✅ 연결 해제
   socket.on('disconnect', () => {
-    console.log(`🔌 연결 해제: ${socket.id}`);
-    if (activeInterviewer?.socketId === socket.id) {
-      console.log(`⚠️ 면접관 퇴장 → 상태 초기화됨`);
+    if (socket.data.role === 'applicant') {
       activeInterviewer = null;
+      console.log('💤 지원자 퇴장 → activeInterviewer 리셋');
+    }
+
+    if (activeInterviewer?.socketId === socket.id) {
+      activeInterviewer = null;
+      console.log('⚠️ 면접관 퇴장 → 상태 초기화됨');
     }
   });
 });
